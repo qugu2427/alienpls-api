@@ -2,11 +2,19 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 const asyncRedis = require("async-redis");
-const redisClient = asyncRedis.createClient();
+const redisClient = asyncRedis.createClient({
+  host: "alienpls.zxvsqi.ng.0001.usw1.cache.amazonaws.com",
+  port: 6379,
+});
 const axios = require("axios");
 const credentials = require("./credentials");
 
-app.use(cors());
+const corsOptions = {
+  origin: "https://www.alienpls.com",
+  methods: "GET,POST,DELETE",
+};
+
+app.use(cors(corsOptions));
 
 // listen to port
 const port = process.env.PORT || 3000;
@@ -17,11 +25,16 @@ let server = app.listen(port, function () {
 // set up socket io with redis
 const io = require("socket.io")(server, {
   cors: {
-    origin: "*",
+    origin: corsOptions.origin,
   },
 });
 const redisAdapter = require("socket.io-redis");
-io.adapter(redisAdapter({ host: "localhost", port: 6379 }));
+io.adapter(
+  redisAdapter({
+    host: "alienpls.zxvsqi.ng.0001.usw1.cache.amazonaws.com",
+    port: 6379,
+  })
+);
 
 app.use(express.json());
 
@@ -472,6 +485,20 @@ app.post("/vote", async function (req, res) {
     }
 
     res.status(200).json({ voteStatus });
+  } catch (err) {
+    console.log(err);
+    res.status(500).send("unknown error");
+  }
+});
+
+app.get("/admin/flush", async function (req, res) {
+  try {
+    if (req.query.password != credentials.adminPassword) {
+      res.status(401).send("access denied");
+      return;
+    }
+    await redisClient.flushall();
+    res.status(200).send("flushed");
   } catch (err) {
     console.log(err);
     res.status(500).send("unknown error");
