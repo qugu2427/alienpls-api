@@ -1,20 +1,11 @@
+const credentials = require("./credentials");
 const express = require("express");
 const cors = require("cors");
 const app = express();
 const asyncRedis = require("async-redis");
-const redisClient = asyncRedis.createClient({
-  host: "alienpls.zxvsqi.ng.0001.usw1.cache.amazonaws.com",
-  port: 6379,
-});
+const redisClient = asyncRedis.createClient(credentials.redisOptions);
 const axios = require("axios");
-const credentials = require("./credentials");
-
-const corsOptions = {
-  origin: "https://www.alienpls.com",
-  methods: "GET,POST,DELETE",
-};
-
-app.use(cors(corsOptions));
+app.use(cors(credentials.corsOptions));
 
 // listen to port
 const port = process.env.PORT || 3000;
@@ -25,23 +16,20 @@ let server = app.listen(port, function () {
 // set up socket io with redis
 const io = require("socket.io")(server, {
   cors: {
-    origin: corsOptions.origin,
+    origin: credentials.corsOptions.origin,
   },
 });
 const redisAdapter = require("socket.io-redis");
-io.adapter(
-  redisAdapter({
-    host: "alienpls.zxvsqi.ng.0001.usw1.cache.amazonaws.com",
-    port: 6379,
-  })
-);
+io.adapter(redisAdapter(credentials.redisOptions));
 
 app.use(express.json());
 
+// buffer time is the time added to the dequeue time, so everyone can catch up
 const bufferTime = 5000;
+// refresh time is the rate at wich ::dequeues is scanned
 const refreshInterval = 10000;
 
-// Help functions
+// fetch user object from twitch
 async function getUser(authorization) {
   let query = await axios({
     method: "get",
@@ -54,24 +42,25 @@ async function getUser(authorization) {
   return query.data.data[0];
 }
 
-async function getRoom(name) {
-  let users = await redisClient.hgetall(name + "::users");
+// generate a room object
+async function getRoom(room) {
+  let users = await redisClient.hgetall(room + "::users");
   delete users["connections"];
-  let queue = await redisClient.lrange(name + "::queue", 0, -1);
+  let queue = await redisClient.lrange(room + "::queue", 0, -1);
   for (let i = 0; i < queue.length; i++) {
     queue[i] = JSON.parse(queue[i]);
   }
   return {
-    name: await redisClient.hget(name, "name"),
-    description: await redisClient.hget(name, "description"),
-    image: await redisClient.hget(name, "image"),
-    queueLimit: parseInt(await redisClient.hget(name, "queueLimit")),
-    currentMedia: JSON.parse(await redisClient.hget(name, "currentMedia")),
-    likes: parseInt(await redisClient.hget(name + "::votes", "likes")),
-    dislikes: parseInt(await redisClient.hget(name + "::votes", "dislikes")),
+    name: await redisClient.hget(room, "name"),
+    description: await redisClient.hget(room, "description"),
+    image: await redisClient.hget(room, "image"),
+    queueLimit: parseInt(await redisClient.hget(room, "queueLimit")),
+    currentMedia: JSON.parse(await redisClient.hget(room, "currentMedia")),
+    likes: parseInt(await redisClient.hget(room + "::votes", "likes")),
+    dislikes: parseInt(await redisClient.hget(room + "::votes", "dislikes")),
     queue: queue,
     connections: parseInt(
-      await redisClient.hget(name + "::users", "connections")
+      await redisClient.hget(room + "::users", "connections")
     ),
     users: users,
   };
@@ -162,7 +151,7 @@ app.post("/create", async function (req, res) {
 
     // just during alpha testing
     if (user.display_name != "erobb15") {
-      res.status(403).send("Create is disabled during alpha testing :(");
+      res.status(403).send("create is disabled during alpha testing :(");
       return;
     }
 
@@ -177,8 +166,8 @@ app.post("/create", async function (req, res) {
     ) {
       res.status(400).send("missing one or more body params");
       return;
-    } else if (!/^[a-zA-Z0-9]{4,30}$/.test(req.body.name)) {
-      res.status(400).send("name is invalid");
+    } else if (!/^[a-z0-9]{4,30}$/.test(req.body.name)) {
+      res.status(400).send("name may only be lowercase letters and numbers");
       return;
     } else if (!/^.[^;{}]{4,200}$/.test(req.body.description)) {
       res.status(400).send("description is invalid");
@@ -365,7 +354,7 @@ app.post("/enqueue", async function (req, res) {
 
     // play if queue is empty
     if (!(await redisClient.hexists("::dequeues", req.body.room))) {
-      console.log(req.body.room + " - FIRST IN QUEUE");
+      console.log("FIRST IN QUEUE " + req.body.room);
       popAndPlay(req.body.room);
     }
 
@@ -413,17 +402,14 @@ app.post("/vote", async function (req, res) {
     let oldVote = voted
       ? await redisClient.hget(req.body.room + "::votes", user.display_name)
       : 0;
-    console.log(`likes: ${likes}, dislikes: ${dislikes}, old vote: ${oldVote}`);
 
     // remove vote if voted
     if (oldVote == 1) {
-      console.log("deleting like");
       console.log(likes - 1);
       await redisClient.hdel(req.body.room + "::votes", user.display_name);
       await redisClient.hset(req.body.room + "::votes", "likes", likes - 1);
     } else if (oldVote == -1) {
       console.log(dislikes - 1);
-      console.log("deleting dislike");
       await redisClient.hdel(req.body.room + "::votes", user.display_name);
       await redisClient.hset(
         req.body.room + "::votes",
@@ -575,7 +561,7 @@ async function popAndPlay(room) {
     redisClient.hdel("::dequeues", room);
     return;
   }
-  console.log(`POP AND PLAY: ${media.id} to ${room}`);
+  console.log(`POP AND PLAY ${media.id} ${room}`);
   io.to(room).emit("play", media);
   await redisClient.hset(
     "::dequeues",
@@ -600,18 +586,18 @@ async function popAndPlay(room) {
 
 setInterval(async function () {
   try {
-    console.log("... scanning");
+    console.log("SCANNING");
     let dequeues = await redisClient.hgetall("::dequeues");
     for (let room in dequeues) {
       if (parseInt(dequeues[room]) < Date.now()) {
-        console.log(`.... time ${room}`);
+        console.log(`TIME REACHED ${room}`);
         popAndPlay(room);
         io.to(room).emit("dequeue");
       } else {
-        console.log(`.... not yet time ${room}`);
+        console.log(`PASSING ${room}`);
       }
     }
-    console.log("... finished scanning");
+    console.log(`FINISHED SCANNING ${room}`);
   } catch (err) {
     console.log("DEQUEUE ERROR " + err);
   }
